@@ -1,5 +1,4 @@
-// server.js - Full-featured Socket.io chat server with rooms, private messages, file sharing, read receipts, reactions
-
+// server.js
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -10,6 +9,7 @@ const mongoose = require('mongoose');
 
 dotenv.config();
 
+// MongoDB connection
 mongoose.connect(process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/chatapp', {
   useNewUrlParser: true,
   useUnifiedTopology: true,
@@ -17,6 +17,7 @@ mongoose.connect(process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/chatapp', {
 .then(() => console.log("MongoDB connected"))
 .catch(err => console.log("MongoDB connection error:", err));
 
+// Message Schema
 const messageSchema = new mongoose.Schema({
   sender: String,
   senderId: String,
@@ -25,13 +26,14 @@ const messageSchema = new mongoose.Schema({
   timestamp: { type: Date, default: Date.now },
   isPrivate: { type: Boolean, default: false },
   to: String,
+  reactions: { type: Map, of: [String] }, // { emoji: [username, ...] }
+  readBy: { type: [String], default: [] }, // usernames who read
   type: { type: String, default: "text" }, // text or image
-  read: { type: Boolean, default: false },
-  reactions: { type: Map, of: [String], default: {} },
 });
 
 const Message = mongoose.model("Message", messageSchema);
 
+// Express + Socket.io
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
@@ -46,37 +48,52 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-const users = {};
-const typingUsers = {};
+// Connected users tracking
+const users = {};       // { socketId: { username, currentRoom, socketId } }
+const typingUsers = {}; // { socketId: username }
+const usernames = {};   // { username: socketId } - for private messages
 
-// --- Socket.io ---
+// Helper to get all online usernames
+const getOnlineUsers = () => Object.values(users).map(u => u.username);
+
+// SOCKET.IO
 io.on('connection', (socket) => {
-  console.log(`User connected: ${socket.id}`);
+  console.log(`[SOCKET] User connected: ${socket.id}`);
 
-  // User joins
+  // Join chat
   socket.on('user_join', (username) => {
-    users[socket.id] = { username, id: socket.id, currentRoom: "global" };
+    if (!username || username.trim() === '') {
+      console.warn('[SOCKET] Invalid username on join');
+      return;
+    }
+    
+    users[socket.id] = { username, currentRoom: "global", socketId: socket.id };
+    usernames[username] = socket.id;
     socket.join("global");
-    io.emit('user_list', Object.values(users));
-    io.emit('user_joined', { username, id: socket.id });
+
+    console.log(`[SOCKET] ${username} joined global room. Total users: ${Object.keys(users).length}`);
+    
+    // Notify everyone
+    const onlineUsers = getOnlineUsers();
+    io.emit('user_list', onlineUsers);
+    io.emit('user_joined', { username });
   });
 
-  // Switch rooms
+  // Switch room
   socket.on('switch_room', async (room) => {
-    const user = users[socket.id];
-    if (!user) return;
-
-    const oldRoom = user.currentRoom;
+    if (!users[socket.id]) return;
+    const oldRoom = users[socket.id].currentRoom;
     socket.leave(oldRoom);
     socket.join(room);
-    user.currentRoom = room;
+    users[socket.id].currentRoom = room;
 
-    const roomMessages = await Message.find({ room, isPrivate: false }).sort({ timestamp: 1 });
-    socket.emit('room_messages', roomMessages);
+    // Send room messages
+    const msgs = await Message.find({ room, isPrivate: false }).sort({ timestamp: 1 });
+    socket.emit('room_messages', msgs);
   });
 
-  // Send chat message
-  socket.on('send_message', async ({ message, room }) => {
+  // Send message
+  socket.on('send_message', async ({ message, room, type }) => {
     const user = users[socket.id];
     if (!user) return;
 
@@ -85,32 +102,30 @@ io.on('connection', (socket) => {
       senderId: socket.id,
       message,
       room: room || user.currentRoom,
-      type: "text",
       timestamp: new Date(),
+      type: type || "text",
       isPrivate: false,
     };
 
-    const saved = await Message.create(msg);
-    io.to(saved.room).emit('receive_message', saved);
-  });
+    try {
+      const saved = await Message.create(msg);
+      io.to(saved.room).emit('receive_message', saved);
 
-  // Typing indicator
-  socket.on('typing', (isTyping) => {
-    const user = users[socket.id];
-    if (!user) return;
-
-    const room = user.currentRoom;
-    if (isTyping) typingUsers[socket.id] = user.username;
-    else delete typingUsers[socket.id];
-
-    io.to(room).emit('typing_users', Object.values(typingUsers));
+      // Notifications for browser
+      io.to(saved.room).emit('new_message_notification', {
+        message: saved.message,
+        sender: saved.sender,
+        room: saved.room,
+      });
+    } catch (err) {
+      console.log(err);
+    }
   });
 
   // Private messages
   socket.on('private_message', async ({ to, message }) => {
     const user = users[socket.id];
     if (!user) return;
-
     const msg = {
       sender: user.username,
       senderId: socket.id,
@@ -118,79 +133,83 @@ io.on('connection', (socket) => {
       timestamp: new Date(),
       isPrivate: true,
       to,
-      type: "text",
     };
-
     const saved = await Message.create(msg);
     socket.to(to).emit('private_message', saved);
     socket.emit('private_message', saved);
   });
 
-  // File/image sharing
-  socket.on('send_file', async ({ fileData, fileName, room }) => {
+  // Typing
+  socket.on('typing', (isTyping) => {
     const user = users[socket.id];
     if (!user) return;
-
-    const msg = {
-      sender: user.username,
-      senderId: socket.id,
-      message: fileData,
-      room: room || user.currentRoom,
-      type: 'image',
-      timestamp: new Date(),
-      isPrivate: false,
-    };
-
-    const saved = await Message.create(msg);
-    io.to(saved.room).emit('receive_message', saved);
+    
+    if (isTyping) {
+      typingUsers[socket.id] = user.username;
+    } else {
+      delete typingUsers[socket.id];
+    }
+    
+    const typingList = Object.values(typingUsers);
+    io.to(user.currentRoom).emit('typing_users', typingList);
   });
 
-  // Read receipts
-  socket.on('message_read', async (messageId) => {
-    const msg = await Message.findByIdAndUpdate(messageId, { read: true }, { new: true });
-    io.emit('message_read', messageId);
-  });
-
-  // Message reactions
-  socket.on('react_message', async ({ messageId, reaction, username }) => {
+  // Reactions
+  socket.on('add_reaction', async ({ messageId, emoji }) => {
+    const user = users[socket.id];
+    if (!user) return;
     const msg = await Message.findById(messageId);
-    if (!msg.reactions) msg.reactions = {};
-    if (!msg.reactions[reaction]) msg.reactions[reaction] = [];
-    if (!msg.reactions[reaction].includes(username)) msg.reactions[reaction].push(username);
+    if (!msg) return;
 
+    if (!msg.reactions) msg.reactions = new Map();
+    const usersReacted = msg.reactions.get(emoji) || [];
+    if (!usersReacted.includes(user.username)) usersReacted.push(user.username);
+    msg.reactions.set(emoji, usersReacted);
     await msg.save();
-    io.emit('message_reaction', { messageId, reactions: msg.reactions });
+
+    io.to(user.currentRoom).emit('update_reactions', { messageId, reactions: msg.reactions });
   });
 
   // Disconnect
   socket.on('disconnect', () => {
     const user = users[socket.id];
     if (user) {
-      io.emit('user_left', { username: user.username, id: socket.id });
+      console.log(`[SOCKET] ${user.username} disconnected. Total users: ${Object.keys(users).length - 1}`);
+      delete usernames[user.username];
+      io.emit('user_left', { username: user.username });
     }
     delete users[socket.id];
     delete typingUsers[socket.id];
-    io.emit('user_list', Object.values(users));
+    const onlineUsers = getOnlineUsers();
+    io.emit('user_list', onlineUsers);
     io.emit('typing_users', Object.values(typingUsers));
   });
 });
 
-// --- API ---
+// API for messages
 app.get('/api/messages', async (req, res) => {
+  const room = req.query.room || "global";
+  const page = parseInt(req.query.page) || 1;
+  const limit = 20;
   try {
-    const room = req.query.room || "global";
-    const messages = await Message.find({ room, isPrivate: false }).sort({ timestamp: 1 });
-    res.json(messages);
+    const msgs = await Message.find({ room, isPrivate: false })
+      .sort({ timestamp: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit);
+    res.json(msgs.reverse());
   } catch (err) {
-    res.status(500).json({ error: 'Failed to fetch messages' });
+    res.status(500).json({ error: "Failed to fetch messages" });
   }
 });
 
+// API for users
 app.get('/api/users', (req, res) => res.json(Object.values(users)));
 
-app.get('/', (req, res) => res.send('Socket.io Chat Server is running'));
+// Root
+app.get('/', (req, res) => res.send('Socket.io Chat Server Running'));
 
+// Start
 const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+server.listen(PORT, () => console.log(`Server running on ${PORT}`));
 
 module.exports = { app, server, io };

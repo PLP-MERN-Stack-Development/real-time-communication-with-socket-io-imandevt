@@ -8,19 +8,31 @@ export default function ChatWindow({ messages = [] }) {
   }, [messages])
 
   return (
-    <div className="w-full md:w-3/4 flex-1 flex flex-col p-3 md:p-4 overflow-auto bg-white">
-      <div className="flex-1 space-y-2">
-        {messages.map((msg, idx) => (
-          <div key={msg._id || idx} className="mb-2 p-2 rounded-md bg-slate-50">
-            <div className="text-sm text-gray-600">
-              <strong className="text-gray-800">{msg.sender}</strong>{' '}
-              <span className="text-gray-500">[{new Date(msg.timestamp).toLocaleTimeString()}]</span>
+    <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-white">
+      {messages.length === 0 ? (
+        <div className="flex items-center justify-center h-full text-gray-400">
+          <p>No messages yet. Start the conversation!</p>
+        </div>
+      ) : (
+        messages.map((msg, idx) => (
+          <div key={msg._id || idx} className="flex gap-2">
+            <div className="flex-1">
+              <div className="flex items-center gap-2">
+                <strong className="text-blue-600">{msg.sender}</strong>
+                <span className="text-xs text-gray-500">
+                  {new Date(msg.timestamp).toLocaleTimeString()}
+                </span>
+              </div>
+              {msg.type === 'system' ? (
+                <p className="text-sm text-gray-500 italic">{msg.message}</p>
+              ) : (
+                <p className="text-gray-800">{msg.message}</p>
+              )}
             </div>
-            <div className="mt-1 text-gray-900">{msg.message}</div>
           </div>
-        ))}
-        <div ref={endRef} />
-      </div>
+        ))
+      )}
+      <div ref={endRef} />
     </div>
   )
 }

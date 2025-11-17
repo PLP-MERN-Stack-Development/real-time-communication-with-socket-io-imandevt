@@ -22,3 +22,4 @@ export default function Login({ onLogin }) {
     </div>
   );
 }
+<div className="bg-red-500 text-white p-4">TEST TAILWIND</div>
