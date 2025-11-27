@@ -38,4 +38,10 @@ const ok = await bcrypt.compare(password, user.password)
 if (!ok) return res.status(401).json({ error: 'invalid credentials' })
 const token = jwt.sign({ userId: user._id, username: user.username }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN })
 res.json({ token, user: { userId: user._id, username: user.username } })
+} catch (err) {
+console.error(err)
+res.status(500).json({ error: 'server error' })
+}
+})
+
 module.exports = router

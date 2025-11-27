@@ -1,0 +1,9 @@
+@import "tailwindcss";
+
+/* small overrides */
+html,body,#root { height: 100%; }
+.app-root {
+  padding: 1.5rem;
+  background-color: #f8fafc;
+  min-height: 100vh;
+}

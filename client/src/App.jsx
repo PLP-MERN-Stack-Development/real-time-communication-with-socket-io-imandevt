@@ -22,6 +22,11 @@ export default function App() {
   const [isConnected, setIsConnected] = useState(true)
 
   useEffect(() => {
+    // Connect socket on mount
+    if (!socket.connected) {
+      socket.connect()
+    }
+
     socket.on("connect", () => {
       console.log("Connected to server")
       setIsConnected(true)
@@ -95,6 +100,10 @@ export default function App() {
   const handleLogin = (name) => {
     setUsername(name)
     setLoggedIn(true)
+    // Ensure socket is connected before emitting
+    if (!socket.connected) {
+      socket.connect()
+    }
     socket.emit("user_join", name)
     fetchMessages("global")
   }
